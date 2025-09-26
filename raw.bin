@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Deriv Matches Analyzer - Live</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:#0f172a;color:#e6eef8;margin:0;padding:18px}
+    .card{background:#0b1220;border:1px solid rgba(255,255,255,0.03);padding:16px;border-radius:12px;box-shadow:0 6px 30px rgba(2,6,23,0.6);max-width:980px;margin:12px auto}
+    h1{font-size:20px;margin:0 0 12px}
+    label{font-size:13px;color:#9fb0d9}
+    input,select,button{font-size:14px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:#08101a;color:#e6eef8}
+    .row{display:flex;gap:8px;align-items:center;margin:10px 0}
+    .cols{display:grid;grid-template-columns:1fr 320px;gap:12px}
+    .digit-bars{display:flex;gap:6px;align-items:flex-end;height:160px;padding:10px;background:linear-gradient(180deg,#071022,#06101c);border-radius:8px}
+    .bar{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:4px;border-radius:6px}
+    .bar-inner{width:100%;border-radius:6px 6px 0 0;background:linear-gradient(180deg,#2dd4bf,#06b6d4);text-align:center;color:#001;padding-top:6px;font-weight:700}
+    .ticks{max-height:260px;overflow:auto;background:#06101a;padding:8px;border-radius:8px}
+    .tick{display:flex;justify-content:space-between;padding:6px;border-bottom:1px solid rgba(255,255,255,0.02)}
+    .small{font-size:12px;color:#9fb0d9}
+    .tag{display:inline-block;padding:4px 8px;border-radius:999px;background:#052634;color:#9ff6ea;margin:4px 4px 0 0;font-weight:600}
+    .danger{background:#2b0710;color:#ffb4b4}
+    .controls{display:flex;gap:8px;align-items:center}
+    .footer{font-size:12px;color:#9fb0d9;margin-top:12px}
+    .signal{padding:8px;border-radius:8px;background:linear-gradient(90deg,#052634,#063b2d);margin-top:8px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Deriv Matches Analyzer — Live (Clickable)</h1>
+    <div class="small">Use <strong>Live</strong> mode to stream ticks from Deriv. Enter your <em>app_id</em> and the tick symbol (e.g., <code>R_10</code>, <code>R_50</code>, <code>R_100</code>), then click <em>Start Live</em>.</div>
+
+    <div class="row">
+      <div style="flex:1">
+        <label>Deriv App ID (leave blank to use public demo id 1089)</label>
+        <input id="appId" placeholder="1089 (demo) or your app_id" style="width:100%" />
+      </div>
+      <div style="width:220px">
+        <label>Symbol</label>
+        <input id="symbol" value="R_10" style="width:100%" />
+      </div>
+      <div style="width:150px">
+        <label>Window size</label>
+        <input id="window" type="number" value="300" min="50" max="5000" style="width:100%" />
+      </div>
+    </div>
+
+    <div class="row controls">
+      <button id="startLive">Start Live</button>
+      <button id="stopLive">Stop Live</button>
+      <label style="display:flex;align-items:center;gap:8px;margin-left:8px"><input type="checkbox" id="autoSim"/> <span class="small">Auto-simulate trades (demo)</span></label>
+      <div style="margin-left:auto" class="small">Connected: <span id="status">no</span></div>
+    </div>
+
+    <div class="cols" style="margin-top:12px">
+      <div>
+        <div class="digit-bars" id="digitBars"></div>
+
+        <div style="margin-top:12px" class="small">Top probabilities (live)</div>
+        <div id="topProbs" style="margin-top:6px"></div>
+
+        <div style="margin-top:12px" class="small">Signals</div>
+        <div id="signals" class="signal small">No data yet.</div>
+
+        <div class="footer">Important: This tool provides analytics only. Live trading has risk — do not trust any tool that promises guaranteed wins. Use bankroll management and test strategies before risking real funds.</div>
+      </div>
+
+      <div>
+        <div class="small">Last ticks (newest first)</div>
+        <div class="ticks" id="ticksList"></div>
+
+        <div style="margin-top:8px" class="small">Underrepresented digits (&lt;8%)</div>
+        <div id="underDigits" style="margin-top:6px"></div>
+
+        <div style="margin-top:10px" class="small">Debug / Info</div>
+        <div id="debug" style="margin-top:6px" class="small"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // State
+  let ws = null;
+  let ticks = []; // array of digits, oldest -> newest
+  let counts = Array(10).fill(0);
+  let windowSize = 300;
+  let connected = false;
+  let autoSim = false;
+  let lastDigit = null;
+  let markov = Array.from({length:10}, ()=>Array(10).fill(0));
+
+  // DOM
+  const statusEl = document.getElementById('status');
+  const digitBarsEl = document.getElementById('digitBars');
+  const ticksListEl = document.getElementById('ticksList');
+  const underEl = document.getElementById('underDigits');
+  const debugEl = document.getElementById('debug');
+  const topProbsEl = document.getElementById('topProbs');
+  const signalsEl = document.getElementById('signals');
+
+  // Helpers
+  function renderBars(){
+    const total = ticks.length || 1;
+    digitBarsEl.innerHTML = '';
+    for(let d=0; d<10; d++){
+      const pct = counts[d]/total*100;
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      const inner = document.createElement('div');
+      inner.className = 'bar-inner';
+      inner.style.height = Math.max(8, pct*1.2) + 'px';
+      inner.textContent = d + ' ' + pct.toFixed(1) + '%';
+      bar.appendChild(inner);
+      digitBarsEl.appendChild(bar);
+    }
+  }
+
+  function renderTicks(){
+    ticksListEl.innerHTML = '';
+    for(let i = ticks.length-1; i>=0; i--){
+      const d = ticks[i];
+      const el = document.createElement('div');
+      el.className = 'tick';
+      el.innerHTML = '<div style="font-weight:700">'+d+'</div><div class="small">'+(new Date().toLocaleTimeString())+'</div>';
+      ticksListEl.appendChild(el);
+    }
+  }
+
+  function renderUnder(){
+    underEl.innerHTML = '';
+    const total = ticks.length || 1;
+    for(let d=0; d<10; d++){
+      const pct = counts[d]/total*100;
+      if(pct < 8){
+        const tag = document.createElement('span');
+        tag.className = 'tag danger';
+        tag.textContent = d + ' (' + pct.toFixed(1) + '%)';
+        underEl.appendChild(tag);
+      }
+    }
+  }
+
+  function renderTop(){
+    const total = ticks.length || 1;
+    const arr = [];
+    for(let d=0; d<10; d++) arr.push({d,p:counts[d]/total});
+    arr.sort((a,b)=>b.p-a.p);
+    topProbsEl.innerHTML = arr.slice(0,3).map(x => '<div class="small">'+x.d+' — '+(x.p*100).toFixed(2)+'%</div>').join('');
+  }
+
+  function updateSignal(){
+    const total = ticks.length || 1;
+    // Simple example signal: recommend digits that are underrepresented AND not seen in last 5 ticks
+    const recent = ticks.slice(-5);
+    const candidates = [];
+    for(let d=0; d<10; d++){
+      const pct = counts[d]/total*100;
+      if(pct < 8 && !recent.includes(d)) candidates.push({d,pct});
+    }
+    if(candidates.length === 0){
+      signalsEl.textContent = 'No strong signal right now — data looks approximately balanced.';
+    } else {
+      signalsEl.innerHTML = 'Suggested underrepresented digits: ' + candidates.map(c=>c.d+' ('+c.pct.toFixed(1)+'%)').join(', ');
+    }
+  }
+
+  function debug(msg){
+    debugEl.textContent = msg;
+  }
+
+  function pushDigit(d){
+    windowSize = Number(document.getElementById('window').value) || 300;
+    if(ticks.length >= windowSize){
+      const removed = ticks.shift();
+      counts[removed]--;
+    }
+    ticks.push(d);
+    counts[d]++;
+    // update markov
+    if(ticks.length >= 2){
+      const a = ticks[ticks.length-2];
+      const b = ticks[ticks.length-1];
+      markov[a][b] += 1;
+    }
+    lastDigit = d;
+    renderAll();
+  }
+
+  function renderAll(){
+    renderBars();
+    renderTicks();
+    renderUnder();
+    renderTop();
+    updateSignal();
+    statusEl.textContent = connected ? 'yes' : 'no';
+  }
+
+  // Mock generator (for fallback/testing)
+  let mockInterval = null;
+  function startMock(){
+    stopMock();
+    mockInterval = setInterval(()=>{
+      let r = Math.random();
+      let d;
+      if(r < 0.08) d=3;
+      else if(r < 0.15) d=7;
+      else d = Math.floor(Math.random()*10);
+      pushDigit(d);
+    }, 150);
+  }
+  function stopMock(){ if(mockInterval){ clearInterval(mockInterval); mockInterval = null; } }
+
+  // Live WebSocket connection
+  function startLive(){
+    const appIdInput = document.getElementById('appId').value.trim();
+    const symbol = document.getElementById('symbol').value.trim() || 'R_10';
+    const app_id = appIdInput || '1089';
+    const url = 'wss://ws.binaryws.com/websockets/v3?app_id=' + encodeURIComponent(app_id);
+
+    if(ws){ try{ ws.close(); } catch(e){} ws=null; }
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      debug('WebSocket open error: ' + e.toString());
+      return;
+    }
+
+    ws.onopen = function(){
+      connected = true;
+      statusEl.textContent = 'yes';
+      debug('Connected. Subscribing to ticks: ' + symbol);
+      // subscribe to ticks
+      ws.send(JSON.stringify({ticks: symbol}));
+    };
+
+    ws.onmessage = function(ev){
+      try{
+        const msg = JSON.parse(ev.data);
+        if(msg.error){
+          debug('Error from Deriv: ' + JSON.stringify(msg.error));
+        }
+        if(msg.msg_type === 'tick' && msg.tick && msg.tick.quote !== undefined){
+          const q = String(msg.tick.quote);
+          let last = null;
+          for(let i=q.length-1;i>=0;i--){
+            const ch = q[i];
+            if(ch >= '0' && ch <= '9'){ last = Number(ch); break; }
+          }
+          if(last !== null) pushDigit(last);
+        }
+      }catch(e){
+        console.error('parse', e);
+      }
+    };
+
+    ws.onerror = function(err){
+      console.warn('ws error', err);
+      debug('WebSocket error. See console.');
+    };
+
+    ws.onclose = function(){
+      connected = false;
+      statusEl.textContent = 'no';
+      debug('Disconnected from Deriv.');
+    };
+  }
+
+  function stopLive(){
+    if(ws){
+      try{ ws.close(); } catch(e){}
+      ws = null;
+    }
+    connected = false;
+    statusEl.textContent = 'no';
+    debug('Live connection stopped.');
+  }
+
+  // Buttons
+  document.getElementById('startLive').addEventListener('click', function(){
+    stopMock();
+    startLive();
+    // optional: if no live data arrives within 3s, start mock fallback
+    setTimeout(()=>{ if(!connected){ debug('No live connection yet — starting mock fallback.'); startMock(); } }, 3000);
+  });
+  document.getElementById('stopLive').addEventListener('click', function(){
+    stopLive();
+    stopMock();
+  });
+
+  document.getElementById('autoSim').addEventListener('change', function(e){
+    autoSim = e.target.checked;
+  });
+
+  // initialize
+  renderAll();
+
+  // Warn about risks
+  console.log('Deriv Matches Analyzer loaded. Use live mode responsibly. This tool is analytics-only; it does not guarantee profits.');
+})();
+</script>
+</body>
+</html>
